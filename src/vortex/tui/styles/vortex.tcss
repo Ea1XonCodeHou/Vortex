@@ -1,0 +1,191 @@
+Screen {
+    background: #171a24;
+    color: #e5e7eb;
+    padding: 0 1;
+}
+
+#product-line {
+    height: 2;
+    padding: 0 1;
+    color: #c4b5fd;
+    text-style: bold;
+    content-align: left middle;
+}
+
+#welcome-panel {
+    height: 16;
+    border: round #8b5cf6;
+    border-title-color: #c4b5fd;
+    border-title-style: bold;
+    background: #1d2130;
+}
+
+#brand-pane {
+    width: 31%;
+    height: 100%;
+    padding: 1 2;
+    border-right: solid #3f3f5a;
+    content-align: center middle;
+}
+
+#welcome-title {
+    height: 2;
+    text-align: center;
+    text-style: bold;
+    color: #f8fafc;
+}
+
+#logo-row {
+    height: 6;
+}
+
+#vortex-logo {
+    width: auto;
+    height: 6;
+    text-align: left;
+    color: #a78bfa;
+    text-style: bold;
+}
+
+#product-description {
+    height: 1;
+    text-align: center;
+    color: #67e8f9;
+}
+
+#workspace-path {
+    height: 2;
+    margin-top: 1;
+    text-align: center;
+    color: #cbd5e1;
+    text-overflow: ellipsis;
+}
+
+#info-pane {
+    width: 1fr;
+    height: 100%;
+    padding: 1 2;
+}
+
+.section-title {
+    height: 1;
+    color: #a78bfa;
+    text-style: bold;
+}
+
+.section-copy {
+    height: 3;
+    color: #e2e8f0;
+    margin-top: 1;
+}
+
+.section-rule {
+    height: 1;
+    margin-bottom: 1;
+    border-top: solid #4c466d;
+}
+
+#interface-status {
+    height: 3;
+    padding: 1 1 0 1;
+    color: #94a3b8;
+}
+
+#transcript {
+    height: 1fr;
+    min-height: 2;
+    padding: 0 2;
+    color: #e5e7eb;
+    overflow-y: auto;
+}
+
+ChatMessage {
+    width: 1fr;
+    height: auto;
+    min-height: 2;
+    margin-bottom: 1;
+    layout: vertical;
+}
+
+.message-label {
+    width: 1fr;
+    height: 1;
+}
+
+.message-plain {
+    width: 1fr;
+    height: auto;
+}
+
+.message-markdown {
+    width: 1fr;
+    height: auto;
+    padding: 0;
+    background: transparent;
+    overflow-y: hidden;
+}
+
+.message-state {
+    width: 1fr;
+    height: auto;
+}
+
+.user-message {
+    color: #e2e8f0;
+}
+
+.assistant-message {
+    color: #f8fafc;
+}
+
+.error-message {
+    color: #fda4af;
+}
+
+#prompt-row {
+    height: 3;
+    border-top: solid #64748b;
+    border-bottom: solid #64748b;
+    background: #171a24;
+}
+
+#prompt-symbol {
+    width: 3;
+    padding-left: 1;
+    color: #67e8f9;
+    text-style: bold;
+    content-align: center middle;
+}
+
+#prompt {
+    width: 1fr;
+    height: 3;
+    border: none;
+    padding: 0 1;
+    background: #171a24;
+    color: #f8fafc;
+}
+
+#prompt:focus {
+    border: none;
+}
+
+#status-bar {
+    height: 1;
+    padding-left: 3;
+    color: #94a3b8;
+    background: #171a24;
+}
+
+WelcomeScreen.compact #welcome-panel {
+    height: 15;
+}
+
+WelcomeScreen.compact #brand-pane {
+    width: 1fr;
+    border-right: none;
+}
+
+WelcomeScreen.compact #info-pane {
+    display: none;
+}
