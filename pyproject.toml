@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "vortex-agent"
-version = "0.0.2"
+version = "0.2.0"
 description = "A local, observable, and controllable Agent Runtime."
 readme = "README.md"
 license = "MIT"
@@ -31,6 +31,7 @@ dev = [
 
 [tool.uv.build-backend]
 module-name = "vortex"
+source-exclude = [".DS_Store", ".env", ".env.*"]
 
 [tool.ruff]
 target-version = "py312"

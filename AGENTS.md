@@ -35,17 +35,25 @@ Vortex 不是垂直业务助手，也不是“模型 API + 聊天页面”。任
 - DeepSeek V4 Flash 默认接入
 - OpenAI-compatible Chat Completions
 - 异步流式文本、Token 用量和安全错误映射
+- DeepSeek 原生流式 Tool Calling 与跨分片调用组装
 - 默认关闭思考模式
 - 当前进程内临时多轮历史
+- 自研有界单 Agent Loop 与类型化 Runtime Event
+- Tool Registry、统一 Executor 和 Observation 回填
+- 工作区受限的 `list_directory`、`read_file`、`search_files`
+- 面向大型仓库的 `workspace_overview` 与大文件连续分块读取
+- 只读工具首次调用审批、允许一次/本会话/拒绝和进程内缓存
+- 最大迭代、工具调用、工具超时和预算耗尽后的强制总结
+- TUI 工具调用、结果预览、耗时和结束状态展示
+- TUI 选区复制、复制/取消动态路由和 macOS 剪贴板兼容
 - Textual MarkdownStream 增量 GFM 渲染
 - 生成取消与输入状态恢复
-- Fake Provider、MockTransport 和无头 TUI 测试
+- Fake Provider、Fake Tool、MockTransport 和无头 TUI 测试
 - 项目代码采用 MIT License
 
 当前尚未实现：
 
-- Agent Loop 和 Tool Calling
-- Tool Registry、权限审批与 Shell 隔离
+- 文件修改、Shell 执行、持久化权限策略与执行沙箱
 - 持久化 Session、Task、Run、Step 和 Event
 - 上下文压缩、长期记忆和检索
 - MCP、多 Agent、FastAPI Core 和 Web Console
@@ -61,24 +69,24 @@ src/vortex/
 ├── config/         环境变量、配置默认值和配置验证
 ├── domain/         供应商无关的消息、事件和值对象
 ├── providers/      ModelProvider 协议、模型适配器和错误归一化
-├── runtime/        对话服务，未来承载 Agent Loop 和运行状态机
+├── runtime/        单 Agent Loop、运行限制与内存状态提交
 ├── tools/          工具定义、Schema、Registry 和调用管道
-├── permissions/    风险分级、Policy 和 Approval
-├── persistence/    Repository、数据库映射和迁移入口
-├── protocol/       CLI/TUI/Web 共享的命令与事件协议
-└── api/            Core 控制接口和事件订阅接口
+└── permissions/    风险分级、Policy 和 Approval
 ```
+
+`persistence`、`protocol`、`api` 和 Web 等规划模块只在开始实现对应纵向能力时创建，不保留空
+目录或无行为的占位类。
 
 当前数据流：
 
 ```text
 Input
   → WelcomeScreen
-  → ChatService
-  → ModelProvider
-  → DeepSeekProvider
-  → ModelEvent
-  → MarkdownStream / TUI status
+  → AgentRuntime
+  → ModelProvider / ToolExecutor
+  → DeepSeekProvider / ToolRegistry
+  → RuntimeEvent
+  → MarkdownStream / ToolCallView / TUI status
 ```
 
 模块边界要求：
@@ -118,14 +126,14 @@ OpenAI Agents SDK 等编排框架引入核心执行路径，除非任务明确�
 
 ### 4.4 状态提交
 
-- 当前 `ChatService` 采用成功后原子提交一轮用户消息与模型回复
+- 当前 `AgentRuntime` 仅在 Run 成功后原子提交用户消息、工具调用、Observation 与最终回复
 - 失败或取消的模型文本可用于 UI 展示，但不得自动进入下一轮上下文
 - 未来持久化后，完整会话记录、模型上下文和长期记忆必须保持概念分离
 - 不要把数据库中的全部历史无条件发送给模型
 
 ### 4.5 事件优先
 
-未来 Runtime 应围绕 `RunEvent` 驱动客户端更新。事件表示已经发生的事实，必须具备稳定类型、顺序
+Runtime 围绕 `RuntimeEvent` 驱动客户端更新。事件表示已经发生的事实，必须具备稳定类型、顺序
 和关联标识。日志用于调试，Trace 用于调用链与性能分析，两者都不能代替领域事件。
 
 ## 5. 模型 Provider 规范
@@ -169,12 +177,15 @@ OpenAI Agents SDK 等编排框架引入核心执行路径，除非任务明确�
 
 ## 7. 配置与密钥安全
 
-- `.env` 是本地敏感文件，永远不得提交
+- 仓库根目录 `.env` 是 Vortex 当前阶段绑定的私有模型配置，永远不得提交
+- 配置路径不得根据 Agent 工作区或 current working directory 改变
+- 当前阶段不读取工作区 `.env`，也不允许 Shell 同名变量覆盖项目提供的模型凭证
 - `.env.example` 只包含变量名和安全默认值
 - 不得读取、打印、记录、截图或回显用户的真实 API Key
 - API Key 使用 `SecretStr` 等安全类型
 - 用户错误信息不得包含请求头、响应正文、SDK repr 或内部堆栈
 - 代码和测试中只能使用明显的假密钥，例如 `test-key`
+- 默认测试必须注入假配置或 Fake Provider，不得加载仓库真实 `.env`
 - 提交前搜索常见密钥模式，并确认 `.gitignore` 仍覆盖 `.env` 与 `.env.*`
 
 如果密钥曾出现在聊天、日志或提交历史中，应建议用户立即轮换，不能仅依赖删除本地文件。
@@ -203,6 +214,9 @@ OpenAI Agents SDK 等编排框架引入核心执行路径，除非任务明确�
 ## 9. 测试规范
 
 默认测试不得访问网络、消耗 Token 或依赖真实用户配置。
+
+权限测试必须验证允许一次、本会话缓存、拒绝、无客户端时默认拒绝和取消传播。测试注入 Provider
+不代表可以绕过 Runtime 权限管道。
 
 测试层次：
 
@@ -297,8 +311,8 @@ uv run vortex --version
 
 1. 稳定当前模型通信、Markdown 和 TUI 交互
 2. 增加基础斜杠命令与模型配置
-3. 建立最小 Tool Calling 纵向链路
-4. 引入类型化 Run/Step/Event 与权限审批
+3. 为写文件和 Shell 建立风险分级、权限审批与执行隔离
+4. 增加 Trace、完整 Run/Step/Event 记录与任务回放
 5. 再建设持久化会话和 Context Builder
 6. 最后扩展 MCP、多 Agent、后台 Core 和 Web
 
@@ -316,3 +330,5 @@ uv run vortex --version
 - [pytest documentation](https://docs.pytest.org/)
 
 参考优秀项目时应学习其问题拆分、边界和验证方法，不应无条件复制架构、依赖或产品功能。
+
+本地更新命令：uv tool install --editable . --force --reinstall

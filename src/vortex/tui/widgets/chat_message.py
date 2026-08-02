@@ -61,7 +61,7 @@ class ChatMessage(Vertical):
         return Markdown.get_stream(self.query_one(Markdown))
 
     def record_text(self, text: str) -> None:
-        """保存模型原始输出，供上下文提交与后续持久化使用。"""
+        """保存模型原始输出，供当前界面状态和测试读取。"""
         self.body += text
         state_widget = self.query_one(".message-state", Static)
         state_widget.update(Text())

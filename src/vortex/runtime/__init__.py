@@ -1,5 +1,5 @@
 """Vortex 运行时服务。"""
 
-from vortex.runtime.chat import ChatBusyError, ChatService
+from vortex.runtime.agent import AgentBusyError, AgentRuntime
 
-__all__ = ["ChatBusyError", "ChatService"]
+__all__ = ["AgentBusyError", "AgentRuntime"]

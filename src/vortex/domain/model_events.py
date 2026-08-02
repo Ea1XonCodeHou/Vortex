@@ -2,6 +2,8 @@
 
 from dataclasses import dataclass
 
+from vortex.domain.tools import ToolCall
+
 
 @dataclass(frozen=True, slots=True)
 class TextDelta:
@@ -27,4 +29,11 @@ class ModelCompleted:
     usage: TokenUsage | None = None
 
 
-type ModelEvent = TextDelta | ModelCompleted
+@dataclass(frozen=True, slots=True)
+class ToolCallAvailable:
+    """Provider 已完整组装一个模型产生的工具调用。"""
+
+    call: ToolCall
+
+
+type ModelEvent = TextDelta | ToolCallAvailable | ModelCompleted

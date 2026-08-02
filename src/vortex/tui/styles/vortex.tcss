@@ -4,6 +4,58 @@ Screen {
     padding: 0 1;
 }
 
+ToolApprovalScreen {
+    align: center middle;
+    background: #090b12 65%;
+}
+
+#approval-dialog {
+    width: 72;
+    max-width: 92%;
+    height: auto;
+    max-height: 80%;
+    padding: 1 2;
+    border: round #8b5cf6;
+    background: #1d2130;
+}
+
+#approval-title {
+    height: 2;
+    color: #c4b5fd;
+    text-style: bold;
+}
+
+#approval-summary {
+    height: auto;
+    margin-bottom: 1;
+    color: #f8fafc;
+}
+
+#approval-arguments {
+    height: auto;
+    max-height: 12;
+    padding: 1;
+    overflow-y: auto;
+    background: #171a24;
+    color: #cbd5e1;
+}
+
+#approval-scope {
+    height: auto;
+    margin: 1 0;
+    color: #94a3b8;
+}
+
+#approval-actions {
+    height: 3;
+    align-horizontal: right;
+}
+
+#approval-actions Button {
+    min-width: 14;
+    margin-left: 1;
+}
+
 #product-line {
     height: 2;
     padding: 0 1;
@@ -140,6 +192,34 @@ ChatMessage {
 
 .error-message {
     color: #fda4af;
+}
+
+ToolCallView {
+    width: 1fr;
+    height: auto;
+    min-height: 2;
+    margin: 0 0 1 1;
+    padding: 0 1;
+    border-left: solid #4c466d;
+}
+
+.tool-call-summary {
+    width: 1fr;
+    height: 1;
+}
+
+.tool-call-observation {
+    width: 1fr;
+    height: auto;
+    color: #94a3b8;
+}
+
+ToolCallView.failed {
+    border-left: solid #fb7185;
+}
+
+ToolCallView.succeeded {
+    border-left: solid #4ade80;
 }
 
 #prompt-row {
