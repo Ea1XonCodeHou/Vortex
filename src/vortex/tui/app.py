@@ -14,7 +14,9 @@ from vortex.providers.base import ModelProvider
 from vortex.providers.deepseek import DeepSeekProvider
 from vortex.runtime.agent import AgentRuntime
 from vortex.tools.builtin import build_workspace_registry
+from vortex.tools.changes import TurnChangeTracker
 from vortex.tools.registry import ToolRegistry
+from vortex.tools.workspace import Workspace
 from vortex.tui.screens.welcome import WelcomeScreen
 
 log = logging.getLogger(__name__)
@@ -49,6 +51,7 @@ class VortexApp(App[None]):
             self.settings = VortexSettings()
         self.agent_runtime: AgentRuntime | None = None
         self.approval_manager = SessionApprovalManager()
+        self.change_tracker = TurnChangeTracker(Workspace(self.workspace))
         self.startup_error: str | None = None
 
         try:
@@ -58,15 +61,21 @@ class VortexApp(App[None]):
                 base_url=self.settings.deepseek_base_url,
                 timeout_seconds=self.settings.request_timeout_seconds,
             )
-            active_registry = registry or build_workspace_registry(self.workspace)
+            active_registry = registry or build_workspace_registry(
+                self.workspace,
+                self.change_tracker,
+            )
             self.agent_runtime = AgentRuntime(
                 active_provider,
                 active_registry,
                 self.approval_manager,
                 system_prompt=self.settings.system_prompt(),
                 max_iterations=self.settings.max_agent_iterations,
-                max_tool_calls=self.settings.max_agent_tool_calls,
+                max_tools_per_iteration=self.settings.max_tools_per_iteration,
+                max_stalled_iterations=self.settings.max_stalled_iterations,
+                max_consecutive_tool_errors=self.settings.max_consecutive_tool_errors,
                 tool_timeout_seconds=self.settings.tool_timeout_seconds,
+                change_tracker=self.change_tracker,
             )
         except ConfigurationError as exc:
             self.startup_error = str(exc)

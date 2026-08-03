@@ -10,6 +10,7 @@ class ApprovalDecision(StrEnum):
     """用户对一次工具审批请求的决定。"""
 
     ALLOW_ONCE = "allow_once"
+    ALLOW_TURN = "allow_turn"
     ALLOW_SESSION = "allow_session"
     DENY = "deny"
 
@@ -22,6 +23,8 @@ class ToolApprovalRequest:
     iteration: int
     call: ToolCall
     risk: ToolRisk
+    allowed_decisions: tuple[ApprovalDecision, ...]
+    preview: str = ""
 
 
 @dataclass(frozen=True, slots=True)

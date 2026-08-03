@@ -13,11 +13,13 @@ from textual.widgets import Input, Static
 from textual.worker import Worker
 
 from vortex import __version__
+from vortex.domain.changes import RevertStatus
 from vortex.domain.model_events import TokenUsage
 from vortex.domain.permissions import ApprovalDecision, ToolApprovalRequest
 from vortex.domain.run_events import (
     AssistantTextDelta,
     RunFinished,
+    RunStarted,
     RunStatus,
     TerminationReason,
     ToolApprovalRequested,
@@ -29,8 +31,10 @@ from vortex.permissions.session import SessionApprovalManager
 from vortex.providers.errors import ModelError
 from vortex.runtime.agent import AgentBusyError, AgentRuntime
 from vortex.tui.screens.approval import ToolApprovalScreen
+from vortex.tui.screens.change_review import ChangeReviewScreen
 from vortex.tui.widgets.chat_message import ChatMessage, MarkdownStreamWriter
 from vortex.tui.widgets.tool_call import ToolCallView
+from vortex.tui.widgets.turn_changes import TurnChangesCard
 
 log = logging.getLogger(__name__)
 
@@ -75,6 +79,7 @@ class WelcomeScreen(Screen[None]):
         self.startup_error = startup_error
         self._active_worker: Worker[None] | None = None
         self._active_message: ChatMessage | None = None
+        self._latest_changes_card: TurnChangesCard | None = None
 
     def compose(self) -> ComposeResult:
         yield Static("➜  ~  Vortex", id="product-line")
@@ -97,8 +102,8 @@ class WelcomeScreen(Screen[None]):
                 yield Static("", classes="section-rule")
                 yield Static("Current milestone", classes="section-title")
                 yield Static(
-                    "Single-agent workspace inspection is ready.\n"
-                    "Runs and conversation history remain in memory.",
+                    "Workspace editing and command verification are ready.\n"
+                    "Commands require approval and return observable results.",
                     classes="section-copy",
                 )
 
@@ -181,14 +186,18 @@ class WelcomeScreen(Screen[None]):
         tool_views: dict[str, ToolCallView] = {}
         terminal_event: RunFinished | None = None
 
-        async def finish_text_segment() -> None:
+        async def finish_text_segment(*, discard: bool = False) -> None:
             nonlocal message, markdown_stream
             if markdown_stream is not None:
                 await markdown_stream.stop()
             if message is not None:
-                message.set_state("completed")
+                if discard:
+                    await message.remove()
+                else:
+                    message.set_state("completed")
             message = None
             markdown_stream = None
+            self._active_message = None
 
         try:
             async for event in self.agent_runtime.run(user_text):
@@ -202,10 +211,15 @@ class WelcomeScreen(Screen[None]):
                         message.record_text(event.text)
                         await markdown_stream.write(event.text)
                 elif isinstance(event, ToolCallStarted):
-                    await finish_text_segment()
+                    # 工具轮文本只是临时行动说明，不作为最终回答长期堆积在对话中。
+                    await finish_text_segment(discard=True)
                     view = ToolCallView(event.call)
                     tool_views[event.call.id] = view
                     await transcript.mount(view)
+                elif isinstance(event, RunStarted):
+                    if self._latest_changes_card is not None:
+                        self._latest_changes_card.mark_accepted()
+                        self._latest_changes_card = None
                 elif isinstance(event, ToolApprovalRequested):
                     self._set_status(f"Waiting for permission · {event.request.call.name}")
                 elif isinstance(event, ToolApprovalResolved):
@@ -218,6 +232,10 @@ class WelcomeScreen(Screen[None]):
                         existing_view.finish(event.result, event.elapsed_ms)
                 elif isinstance(event, RunFinished):
                     terminal_event = event
+                    if event.changes is not None:
+                        card = TurnChangesCard(event.changes)
+                        await transcript.mount(card)
+                        self._latest_changes_card = card
 
             await finish_text_segment()
             if terminal_event is None:
@@ -236,12 +254,13 @@ class WelcomeScreen(Screen[None]):
             if markdown_stream is not None:
                 await markdown_stream.stop()
                 markdown_stream = None
-            if message is not None:
-                message.set_state("cancelled")
-            else:
-                cancelled = ChatMessage("assistant", state="cancelled")
-                await transcript.mount(cancelled)
-            self._set_status(f"Cancelled · {self.model_name}")
+            if self.is_mounted:
+                if message is not None:
+                    message.set_state("cancelled")
+                else:
+                    cancelled = ChatMessage("assistant", state="cancelled")
+                    await transcript.mount(cancelled)
+                self._set_status(f"Cancelled · {self.model_name}")
             raise
         except (ModelError, AgentBusyError) as exc:
             if markdown_stream is not None:
@@ -266,9 +285,12 @@ class WelcomeScreen(Screen[None]):
         finally:
             if markdown_stream is not None:
                 await markdown_stream.stop()
-            prompt = self.query_one("#prompt", Input)
-            prompt.disabled = False
-            prompt.focus()
+            prompts = list(self.query("#prompt"))
+            if prompts:
+                prompt = prompts[0]
+                assert isinstance(prompt, Input)
+                prompt.disabled = False
+                prompt.focus()
             self._active_worker = None
             self._active_message = None
 
@@ -283,6 +305,31 @@ class WelcomeScreen(Screen[None]):
     ) -> ApprovalDecision:
         """在 Agent Worker 中等待审批弹窗返回决定。"""
         return await self.app.push_screen_wait(ToolApprovalScreen(request))
+
+    @on(TurnChangesCard.ReviewRequested)
+    def review_turn_changes(self, event: TurnChangesCard.ReviewRequested) -> None:
+        """打开当前变更卡片对应的完整 Diff。"""
+        self.app.push_screen(ChangeReviewScreen(event.card.summary))
+
+    @on(TurnChangesCard.RevertRequested)
+    def revert_turn_changes(self, event: TurnChangesCard.RevertRequested) -> None:
+        """异步执行最新 Run 的整体安全撤销。"""
+        self._revert_changes(event.card)
+
+    @work(exclusive=True, group="revert")
+    async def _revert_changes(self, card: TurnChangesCard) -> None:
+        if self.agent_runtime is None:
+            card.mark_revert_failed("No Agent Runtime is available.")
+            return
+        result = await self.agent_runtime.revert_latest_turn(card.summary.run_id)
+        if result.status is RevertStatus.REVERTED:
+            card.mark_reverted(result.message)
+            if self._latest_changes_card is card:
+                self._latest_changes_card = None
+            self._set_status(f"Ready · {result.message}")
+            return
+        card.mark_revert_failed(result.message)
+        self._set_status(result.message, error=True)
 
     def action_copy_selection(self) -> None:
         """优先复制对话区选区，其次复制输入框选区。"""
@@ -305,8 +352,8 @@ class WelcomeScreen(Screen[None]):
     def _completed_status(self, event: RunFinished) -> str:
         usage: TokenUsage | None = event.usage
         progress = f"{event.iterations} steps / {event.tool_calls} tools"
-        if event.reason is TerminationReason.BUDGET_FINALIZED:
-            progress += " / finalized at budget"
+        if event.reason is TerminationReason.SAFETY_FINALIZED:
+            progress += " / finalized after safety stop"
         if usage is None:
             return f"Ready · {self.model_name} · {progress}"
         return (
@@ -315,6 +362,10 @@ class WelcomeScreen(Screen[None]):
         )
 
     def _set_status(self, message: str, *, error: bool = False) -> None:
-        status = self.query_one("#interface-status", Static)
+        statuses = list(self.query("#interface-status"))
+        if not statuses:
+            return
+        status = statuses[0]
+        assert isinstance(status, Static)
         color = "#fb7185" if error else "#94a3b8"
         status.update(f"[{color}]│  {message}[/]")

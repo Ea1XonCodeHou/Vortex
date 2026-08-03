@@ -1,5 +1,11 @@
 """Vortex 核心领域对象。"""
 
+from vortex.domain.changes import (
+    FileChangeSummary,
+    RevertResult,
+    RevertStatus,
+    TurnChangeSummary,
+)
 from vortex.domain.messages import Message, MessageRole
 from vortex.domain.model_events import (
     ModelCompleted,
@@ -15,10 +21,13 @@ from vortex.domain.tools import ToolCall, ToolDefinition, ToolResult, ToolRisk
 __all__ = [
     "ApprovalDecision",
     "ApprovalOutcome",
+    "FileChangeSummary",
     "Message",
     "MessageRole",
     "ModelCompleted",
     "ModelEvent",
+    "RevertResult",
+    "RevertStatus",
     "RunStatus",
     "RuntimeEvent",
     "TextDelta",
@@ -29,4 +38,5 @@ __all__ = [
     "ToolDefinition",
     "ToolResult",
     "ToolRisk",
+    "TurnChangeSummary",
 ]

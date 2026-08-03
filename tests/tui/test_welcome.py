@@ -1,5 +1,6 @@
 """欢迎页面的无头启动测试。"""
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -16,9 +17,11 @@ from vortex.providers.errors import ModelError
 from vortex.tools.registry import ToolRegistry
 from vortex.tui.app import VortexApp
 from vortex.tui.screens.approval import ToolApprovalScreen
+from vortex.tui.screens.change_review import ChangeReviewScreen
 from vortex.tui.screens.welcome import WelcomeScreen
 from vortex.tui.widgets.chat_message import ChatMessage
 from vortex.tui.widgets.tool_call import ToolCallView
+from vortex.tui.widgets.turn_changes import TurnChangesCard
 
 
 async def test_welcome_screen_starts(tmp_path: Path) -> None:
@@ -35,7 +38,7 @@ async def test_welcome_screen_starts(tmp_path: Path) -> None:
         prompt = app.screen.query_one("#prompt", Input)
         workspace_path = app.screen.query_one("#workspace-path", Static)
 
-        assert panel.border_title == " Vortex v0.2.0 "
+        assert panel.border_title == " Vortex v0.1.5 "
         assert prompt.has_focus
         assert str(workspace) in str(workspace_path.content)
 
@@ -169,7 +172,11 @@ async def test_tool_call_and_observation_are_rendered_before_final_answer(
     call = ToolCall(id="call-1", name="inspect", arguments={"path": "README.md"})
     provider = FakeProvider(
         [
-            [ToolCallAvailable(call), ModelCompleted(finish_reason="tool_calls")],
+            [
+                "Hmm? Maybe the tool is broken. Let me inspect it.",
+                ToolCallAvailable(call),
+                ModelCompleted(finish_reason="tool_calls"),
+            ],
             ["The workspace contains a README.", ModelCompleted(finish_reason="stop")],
         ]
     )
@@ -198,6 +205,7 @@ async def test_tool_call_and_observation_are_rendered_before_final_answer(
         assert tool_view.result == ToolResult.success("# Vortex")
         assert [message.kind for message in messages] == ["user", "assistant"]
         assert messages[-1].body == "The workspace contains a README."
+        assert all("Hmm?" not in message.body for message in messages)
         assert messages[-1].state == "completed"
         assert len(provider.requests) == 2
 
@@ -268,3 +276,101 @@ async def test_selected_assistant_text_can_be_copied_and_pasted_into_prompt(
 
         prompt = app.screen.query_one("#prompt", Input)
         assert prompt.value == "Copy this answer"
+
+
+async def test_patch_approval_review_and_whole_turn_revert(tmp_path: Path) -> None:
+    target = tmp_path / "example.py"
+    target.write_text("value = 1\n", encoding="utf-8")
+    call = ToolCall(
+        id="patch-1",
+        name="apply_patch",
+        arguments={
+            "path": "example.py",
+            "edits": [{"old_text": "value = 1", "new_text": "value = 2"}],
+        },
+    )
+    provider = FakeProvider(
+        [
+            [ToolCallAvailable(call), ModelCompleted(finish_reason="tool_calls")],
+            ["The value is updated.", ModelCompleted(finish_reason="stop")],
+        ]
+    )
+    app = VortexApp(workspace=tmp_path, provider=provider)
+
+    async with app.run_test(size=(130, 42)) as pilot:
+        await pilot.press(*"update the value")
+        await pilot.press("enter")
+        await pilot.pause()
+
+        approval = app.screen
+        assert isinstance(approval, ToolApprovalScreen)
+        assert "+value = 2" in approval.request.preview
+        assert len(approval.query("#allow-turn")) == 1
+        assert len(approval.query("#allow-session")) == 0
+        assert approval.query_one("#allow-turn").region.height > 0
+        assert approval.query_one("#deny").region.height > 0
+
+        await pilot.press("t")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+        card = app.screen.query_one(TurnChangesCard)
+        assert target.read_text(encoding="utf-8") == "value = 2\n"
+        assert card.summary.files[0].path == "example.py"
+
+        await pilot.click(".review-changes")
+        await pilot.pause()
+        assert isinstance(app.screen, ChangeReviewScreen)
+        await pilot.press("escape")
+        await pilot.pause()
+
+        await pilot.click(".revert-changes")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+        assert target.read_text(encoding="utf-8") == "value = 1\n"
+        assert card.has_class("reverted")
+
+
+async def test_command_requires_single_use_approval_and_renders_output(tmp_path: Path) -> None:
+    call = ToolCall(
+        id="command-1",
+        name="run_command",
+        arguments={
+            "command": [sys.executable, "-c", "print('2 checks passed')"],
+            "cwd": ".",
+        },
+    )
+    provider = FakeProvider(
+        [
+            [ToolCallAvailable(call), ModelCompleted(finish_reason="tool_calls")],
+            ["Verification succeeded.", ModelCompleted(finish_reason="stop")],
+        ]
+    )
+    app = VortexApp(workspace=tmp_path, provider=provider)
+
+    async with app.run_test(size=(130, 42)) as pilot:
+        await pilot.press(*"verify the project")
+        await pilot.press("enter")
+        await pilot.pause()
+
+        approval = app.screen
+        assert isinstance(approval, ToolApprovalScreen)
+        assert "Command:" in approval.request.preview
+        assert "Shell interpretation: disabled" in approval.request.preview
+        assert len(approval.query("#allow-once")) == 1
+        assert len(approval.query("#allow-session")) == 0
+        assert len(approval.query("#allow-turn")) == 0
+        assert approval.query_one("#allow-once").region.height > 0
+
+        await pilot.press("o")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+        view = app.screen.query_one(ToolCallView)
+        observation = view.query_one(".tool-call-observation", Static)
+        assert view.has_class("command-call")
+        assert view.state == "succeeded"
+        assert view.result is not None
+        assert "Exit code: 0" in view.result.content
+        assert "2 checks passed" in str(observation.content)

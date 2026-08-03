@@ -1,6 +1,8 @@
 """纯内存单 Agent Loop 的确定性测试。"""
 
 import asyncio
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -8,7 +10,7 @@ from tests.support.fake_approval import FakeApprovalManager
 from tests.support.fake_provider import BlockingProvider, FakeProvider
 from tests.support.fake_tool import FakeTool
 from vortex.domain.messages import Message, MessageRole
-from vortex.domain.model_events import ModelCompleted, TokenUsage, ToolCallAvailable
+from vortex.domain.model_events import ModelCompleted, ModelEvent, TokenUsage, ToolCallAvailable
 from vortex.domain.permissions import ApprovalDecision, ApprovalOutcome, ToolApprovalRequest
 from vortex.domain.run_events import (
     AssistantTextDelta,
@@ -23,10 +25,14 @@ from vortex.domain.run_events import (
     ToolCallFinished,
     ToolCallStarted,
 )
-from vortex.domain.tools import ToolCall, ToolErrorCode, ToolResult
+from vortex.domain.tools import ToolCall, ToolErrorCode, ToolResult, ToolRisk
 from vortex.providers.errors import ModelError
 from vortex.runtime.agent import AgentRuntime
+from vortex.tools.builtin.apply_patch import ApplyPatchTool
+from vortex.tools.builtin.run_command import RunCommandTool
+from vortex.tools.changes import TurnChangeTracker
 from vortex.tools.registry import ToolRegistry
+from vortex.tools.workspace import Workspace
 
 
 def _call(identifier: str = "call-1") -> ToolCall:
@@ -39,12 +45,28 @@ class _FailingApprovalManager:
         raise RuntimeError("approval callback failed")
 
 
+class _RiskApprovalManager:
+    def __init__(self) -> None:
+        self.requests: list[ToolApprovalRequest] = []
+
+    async def authorize(self, request: ToolApprovalRequest) -> ApprovalOutcome:
+        self.requests.append(request)
+        decision = (
+            ApprovalDecision.ALLOW_TURN
+            if request.risk is ToolRisk.WRITE
+            else ApprovalDecision.ALLOW_ONCE
+        )
+        return ApprovalOutcome(decision)
+
+
 def _runtime(
     provider: FakeProvider | BlockingProvider,
     tool: FakeTool | None = None,
     *,
-    max_iterations: int = 10,
-    max_tool_calls: int = 20,
+    max_iterations: int | None = None,
+    max_tools_per_iteration: int = 8,
+    max_stalled_iterations: int = 3,
+    max_consecutive_tool_errors: int = 6,
 ) -> AgentRuntime:
     registry = ToolRegistry((tool,)) if tool is not None else ToolRegistry()
     return AgentRuntime(
@@ -53,7 +75,9 @@ def _runtime(
         FakeApprovalManager(),
         system_prompt="You are Vortex.",
         max_iterations=max_iterations,
-        max_tool_calls=max_tool_calls,
+        max_tools_per_iteration=max_tools_per_iteration,
+        max_stalled_iterations=max_stalled_iterations,
+        max_consecutive_tool_errors=max_consecutive_tool_errors,
     )
 
 
@@ -177,7 +201,7 @@ async def test_iteration_limit_stops_run_without_committing_partial_history() ->
     finished = events[-1]
     assert isinstance(finished, RunFinished)
     assert finished.status is RunStatus.SUCCEEDED
-    assert finished.reason is TerminationReason.BUDGET_FINALIZED
+    assert finished.reason is TerminationReason.SAFETY_FINALIZED
     assert finished.iterations == 3
     assert finished.tool_calls == 2
     assert finished.final_output == "Best effort summary"
@@ -185,27 +209,155 @@ async def test_iteration_limit_stops_run_without_committing_partial_history() ->
     assert provider.tool_requests[-1] == ()
 
 
-async def test_tool_call_limit_stops_before_executing_excess_call() -> None:
+async def test_per_step_limit_defers_excess_call_without_stopping_run() -> None:
     provider = FakeProvider(
         [
-            [ToolCallAvailable(_call("call-1")), ModelCompleted(finish_reason="tool_calls")],
-            [ToolCallAvailable(_call("call-2")), ModelCompleted(finish_reason="tool_calls")],
-            ["Budget-aware summary", ModelCompleted(finish_reason="stop")],
+            [
+                ToolCallAvailable(_call("call-1")),
+                ToolCallAvailable(_call("call-2")),
+                ModelCompleted(finish_reason="tool_calls"),
+            ],
+            ["Complete summary", ModelCompleted(finish_reason="stop")],
         ]
     )
     tool = FakeTool(ToolResult.success("observation"))
-    runtime = _runtime(provider, tool, max_tool_calls=1)
+    runtime = _runtime(provider, tool, max_tools_per_iteration=1)
 
-    events = [event async for event in runtime.run("Inspect forever")]
+    events = [event async for event in runtime.run("Inspect the workspace")]
 
     finished = events[-1]
     assert isinstance(finished, RunFinished)
     assert finished.status is RunStatus.SUCCEEDED
-    assert finished.reason is TerminationReason.BUDGET_FINALIZED
+    assert finished.reason is TerminationReason.COMPLETED
     assert len(tool.calls) == 1
-    assert finished.final_output == "Budget-aware summary"
-    assert provider.requests[-1][-2].content.startswith("Tool error [execution_limit]")
+    assert finished.final_output == "Complete summary"
+    assert provider.requests[1][-1].content.startswith("Tool error [execution_limit]")
+    assert provider.tool_requests[-1] != ()
+
+
+async def test_progressing_run_is_not_stopped_by_total_tool_call_count() -> None:
+    tool_rounds = 70
+    responses: list[list[str | ModelEvent]] = [
+        [
+            ToolCallAvailable(
+                ToolCall(
+                    id=f"call-{index}",
+                    name="inspect",
+                    arguments={"path": f"file-{index}.py"},
+                )
+            ),
+            ModelCompleted(finish_reason="tool_calls"),
+        ]
+        for index in range(tool_rounds)
+    ]
+    responses.append(["Long task complete", ModelCompleted(finish_reason="stop")])
+    provider = FakeProvider(responses)
+    tool = FakeTool(ToolResult.success("new evidence"))
+    runtime = _runtime(provider, tool)
+
+    events = [event async for event in runtime.run("Inspect a large repository")]
+
+    finished = events[-1]
+    assert isinstance(finished, RunFinished)
+    assert finished.status is RunStatus.SUCCEEDED
+    assert finished.reason is TerminationReason.COMPLETED
+    assert finished.iterations == tool_rounds + 1
+    assert finished.tool_calls == tool_rounds
+    assert len(tool.calls) == tool_rounds
+
+
+async def test_repeated_observations_trigger_safety_finalization() -> None:
+    provider = FakeProvider(
+        [
+            [ToolCallAvailable(_call("call-1")), ModelCompleted(finish_reason="tool_calls")],
+            [ToolCallAvailable(_call("call-2")), ModelCompleted(finish_reason="tool_calls")],
+            [ToolCallAvailable(_call("call-3")), ModelCompleted(finish_reason="tool_calls")],
+            ["I could not make further progress.", ModelCompleted(finish_reason="stop")],
+        ]
+    )
+    tool = FakeTool(ToolResult.success("same observation"))
+    runtime = _runtime(provider, tool, max_stalled_iterations=2)
+
+    events = [event async for event in runtime.run("Inspect repeatedly")]
+
+    finished = events[-1]
+    assert isinstance(finished, RunFinished)
+    assert finished.status is RunStatus.SUCCEEDED
+    assert finished.reason is TerminationReason.SAFETY_FINALIZED
+    assert finished.tool_calls == 3
     assert provider.tool_requests[-1] == ()
+
+
+async def test_consecutive_control_errors_trigger_safety_finalization() -> None:
+    provider = FakeProvider(
+        [
+            [ToolCallAvailable(_call("call-1")), ModelCompleted(finish_reason="tool_calls")],
+            [ToolCallAvailable(_call("call-2")), ModelCompleted(finish_reason="tool_calls")],
+            ["The requested files were unavailable.", ModelCompleted(finish_reason="stop")],
+        ]
+    )
+    tool = FakeTool(ToolResult.failure("Invalid arguments", ToolErrorCode.INVALID_ARGUMENTS))
+    runtime = _runtime(provider, tool, max_consecutive_tool_errors=2)
+
+    events = [event async for event in runtime.run("Inspect unavailable files")]
+
+    finished = events[-1]
+    assert isinstance(finished, RunFinished)
+    assert finished.status is RunStatus.SUCCEEDED
+    assert finished.reason is TerminationReason.SAFETY_FINALIZED
+    assert finished.tool_calls == 2
+
+
+async def test_novel_command_failures_remain_diagnostic_progress() -> None:
+    diagnostic_rounds = 8
+    responses: list[list[str | ModelEvent]] = [
+        [
+            ToolCallAvailable(
+                ToolCall(
+                    id=f"command-{index}",
+                    name="inspect",
+                    arguments={"path": f"check-{index}"},
+                )
+            ),
+            ModelCompleted(finish_reason="tool_calls"),
+        ]
+        for index in range(diagnostic_rounds)
+    ]
+    responses.append(["Diagnosis complete", ModelCompleted(finish_reason="stop")])
+    provider = FakeProvider(responses)
+    tool = FakeTool(ToolResult.failure("Exit code: 1", ToolErrorCode.COMMAND_FAILED))
+    runtime = _runtime(provider, tool)
+
+    events = [event async for event in runtime.run("Diagnose changing failures")]
+
+    finished = events[-1]
+    assert isinstance(finished, RunFinished)
+    assert finished.status is RunStatus.SUCCEEDED
+    assert finished.reason is TerminationReason.COMPLETED
+    assert finished.tool_calls == diagnostic_rounds
+
+
+async def test_safety_finalization_rejects_tool_protocol_artifacts() -> None:
+    provider = FakeProvider(
+        [
+            [ToolCallAvailable(_call()), ModelCompleted(finish_reason="tool_calls")],
+            [
+                '<|DSML|tool_calls><|DSML|invoke name="read_file">',
+                ModelCompleted(finish_reason="stop"),
+            ],
+        ]
+    )
+    runtime = _runtime(provider, FakeTool(ToolResult.success("evidence")), max_iterations=1)
+
+    events = [event async for event in runtime.run("Inspect and stop safely")]
+
+    assert not any(
+        isinstance(event, AssistantTextDelta) and "DSML" in event.text for event in events
+    )
+    finished = events[-1]
+    assert isinstance(finished, RunFinished)
+    assert finished.status is RunStatus.LIMIT_REACHED
+    assert finished.reason is TerminationReason.MAX_ITERATIONS
 
 
 async def test_cancelled_run_emits_terminal_status_and_does_not_commit() -> None:
@@ -284,3 +436,135 @@ async def test_successive_user_runs_reuse_only_committed_history() -> None:
         (MessageRole.USER, "Follow up"),
         (MessageRole.ASSISTANT, "Second answer"),
     ]
+
+
+async def test_write_tool_is_previewed_tracked_and_revertible(tmp_path: Path) -> None:
+    target = tmp_path / "example.py"
+    target.write_text("value = 1\n", encoding="utf-8")
+    call = ToolCall(
+        id="patch-1",
+        name="apply_patch",
+        arguments={
+            "path": "example.py",
+            "edits": [{"old_text": "value = 1", "new_text": "value = 2"}],
+        },
+    )
+    provider = FakeProvider(
+        [
+            [ToolCallAvailable(call), ModelCompleted(finish_reason="tool_calls")],
+            ["Updated and verified.", ModelCompleted(finish_reason="stop")],
+        ]
+    )
+    workspace = Workspace(tmp_path)
+    tracker = TurnChangeTracker(workspace)
+    tool = ApplyPatchTool(workspace, tracker)
+    approvals = FakeApprovalManager(ApprovalDecision.ALLOW_TURN)
+    runtime = AgentRuntime(
+        provider,
+        ToolRegistry((tool,)),
+        approvals,
+        system_prompt="You are Vortex.",
+        change_tracker=tracker,
+    )
+
+    events = [event async for event in runtime.run("Update the value")]
+    finished = events[-1]
+
+    assert isinstance(finished, RunFinished)
+    assert target.read_text(encoding="utf-8") == "value = 2\n"
+    assert approvals.requests[0].allowed_decisions == (
+        ApprovalDecision.ALLOW_TURN,
+        ApprovalDecision.DENY,
+    )
+    assert "+value = 2" in approvals.requests[0].preview
+    assert finished.changes is not None
+    assert finished.changes.files[0].path == "example.py"
+
+    result = await runtime.revert_latest_turn(finished.run_id)
+    assert result.status.value == "reverted"
+    assert target.read_text(encoding="utf-8") == "value = 1\n"
+
+
+async def test_agent_uses_failed_verification_to_fix_and_rerun(tmp_path: Path) -> None:
+    target = tmp_path / "example.py"
+    target.write_text("state = 'A'\n", encoding="utf-8")
+    first_patch = ToolCall(
+        id="patch-1",
+        name="apply_patch",
+        arguments={
+            "path": "example.py",
+            "edits": [{"old_text": "'A'", "new_text": "'B'"}],
+        },
+    )
+    failed_check = ToolCall(
+        id="command-1",
+        name="run_command",
+        arguments={
+            "command": [
+                sys.executable,
+                "-c",
+                "from pathlib import Path; assert \"'C'\" in Path('example.py').read_text()",
+            ],
+        },
+    )
+    corrective_patch = ToolCall(
+        id="patch-2",
+        name="apply_patch",
+        arguments={
+            "path": "example.py",
+            "edits": [{"old_text": "'B'", "new_text": "'C'"}],
+        },
+    )
+    passing_check = ToolCall(
+        id="command-2",
+        name="run_command",
+        arguments=failed_check.arguments,
+    )
+    provider = FakeProvider(
+        [
+            [ToolCallAvailable(first_patch), ModelCompleted(finish_reason="tool_calls")],
+            [ToolCallAvailable(failed_check), ModelCompleted(finish_reason="tool_calls")],
+            [ToolCallAvailable(corrective_patch), ModelCompleted(finish_reason="tool_calls")],
+            [ToolCallAvailable(passing_check), ModelCompleted(finish_reason="tool_calls")],
+            ["Fixed and verified.", ModelCompleted(finish_reason="stop")],
+        ]
+    )
+    workspace = Workspace(tmp_path)
+    tracker = TurnChangeTracker(workspace)
+    approvals = _RiskApprovalManager()
+    runtime = AgentRuntime(
+        provider,
+        ToolRegistry((ApplyPatchTool(workspace, tracker), RunCommandTool(workspace))),
+        approvals,
+        system_prompt="You are Vortex.",
+        change_tracker=tracker,
+    )
+
+    events = [event async for event in runtime.run("Set the expected state and verify it")]
+    finished = events[-1]
+
+    assert isinstance(finished, RunFinished)
+    assert finished.status is RunStatus.SUCCEEDED
+    assert finished.tool_calls == 4
+    assert finished.final_output == "Fixed and verified."
+    assert target.read_text(encoding="utf-8") == "state = 'C'\n"
+    assert "Tool error [command_failed]" in provider.requests[2][-1].content
+    assert "Exit code: 0" in provider.requests[4][-1].content
+    assert [request.risk for request in approvals.requests] == [
+        ToolRisk.WRITE,
+        ToolRisk.EXECUTE,
+        ToolRisk.WRITE,
+        ToolRisk.EXECUTE,
+    ]
+    assert all(
+        request.allowed_decisions
+        == (
+            ApprovalDecision.ALLOW_ONCE,
+            ApprovalDecision.DENY,
+        )
+        for request in approvals.requests
+        if request.risk is ToolRisk.EXECUTE
+    )
+    assert finished.changes is not None
+    assert "-state = 'A'" in finished.changes.diff
+    assert "+state = 'C'" in finished.changes.diff

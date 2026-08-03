@@ -25,8 +25,10 @@ class VortexSettings(BaseSettings):
     deepseek_base_url: str = "https://api.deepseek.com"
     vortex_model: str = "deepseek-v4-flash"
     request_timeout_seconds: float = 180.0
-    max_agent_iterations: int = Field(default=24, ge=1, le=80)
-    max_agent_tool_calls: int = Field(default=64, ge=1, le=240)
+    max_agent_iterations: int | None = Field(default=None, ge=1, le=10_000)
+    max_tools_per_iteration: int = Field(default=8, ge=1, le=64)
+    max_stalled_iterations: int = Field(default=3, ge=1, le=20)
+    max_consecutive_tool_errors: int = Field(default=6, ge=1, le=50)
     tool_timeout_seconds: float = Field(default=15.0, gt=0, le=300)
 
     @classmethod
@@ -65,12 +67,26 @@ class VortexSettings(BaseSettings):
             f"You are currently powered by DeepSeek using the model {self.vortex_model}. "
             "If asked about your identity or underlying model, answer accurately. "
             "Do not claim to be Claude, ChatGPT, or another assistant. "
+            "Do not expose scratch work, hesitation, self-correction, or speculative internal "
+            "monologue. Before a tool call, emit at most one concise action statement. Diagnose "
+            "a failure only from the tool's phase, error code, and Observation; never blame the "
+            "environment when argument validation says the tool was not executed. "
             "Use the available workspace tools whenever a request depends on local files. "
             "Never invent file contents or claim to have inspected a path without using a tool. "
             "For broad repository tasks, use workspace_overview first, inspect instructions and "
             "manifests, then use targeted directory listing and search instead of reading every "
             "dependency or generated file. Read large text files in consecutive chunks when "
-            "their complete contents are genuinely required. "
+            "their complete contents are genuinely required. To edit code, read the target "
+            "file first, then use apply_patch with exact old_text and the smallest practical "
+            "replacement. apply_patch only updates existing UTF-8 files; it cannot create, "
+            "delete, or rename files. Never claim an edit succeeded until the tool confirms it, "
+            "and read the changed area again when verification matters. After changing code, "
+            "inspect the repository's instructions and manifests, then use run_command to run "
+            "the smallest relevant existing tests, type checks, linters, or build checks. Choose "
+            "commands for the actual project language and toolchain; do not assume Python or "
+            "install new dependencies. A command is verified only when run_command reports exit "
+            "code 0. If verification fails, use its output as evidence, fix the cause, and rerun "
+            "the focused check. Never claim a check passed if it was not executed successfully. "
             "When the user's goal is complete, answer with a clear final response and stop "
             "calling tools."
         )

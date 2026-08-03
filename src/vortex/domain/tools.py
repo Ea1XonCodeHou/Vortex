@@ -42,6 +42,9 @@ class ToolErrorCode(StrEnum):
     EXECUTION_LIMIT = "execution_limit"
     NOT_FOUND = "not_found"
     UNSUPPORTED_CONTENT = "unsupported_content"
+    AMBIGUOUS_MATCH = "ambiguous_match"
+    STALE_FILE = "stale_file"
+    COMMAND_FAILED = "command_failed"
     TIMEOUT = "timeout"
     EXECUTION_ERROR = "execution_error"
 

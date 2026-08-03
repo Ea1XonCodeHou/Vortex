@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from enum import StrEnum
 
+from vortex.domain.changes import TurnChangeSummary
 from vortex.domain.model_events import TokenUsage
 from vortex.domain.permissions import ApprovalOutcome, ToolApprovalRequest
 from vortex.domain.tools import ToolCall, ToolResult
@@ -26,8 +27,8 @@ class TerminationReason(StrEnum):
     RUNTIME_ERROR = "runtime_error"
     CANCELLED = "cancelled"
     MAX_ITERATIONS = "max_iterations"
-    MAX_TOOL_CALLS = "max_tool_calls"
-    BUDGET_FINALIZED = "budget_finalized"
+    STALLED = "stalled"
+    SAFETY_FINALIZED = "safety_finalized"
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +110,7 @@ class RunFinished:
     tool_calls: int
     final_output: str = ""
     usage: TokenUsage | None = None
+    changes: TurnChangeSummary | None = None
 
 
 type RuntimeEvent = (

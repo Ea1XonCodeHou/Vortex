@@ -17,8 +17,10 @@ def test_defaults_use_deepseek_v4_flash(monkeypatch: pytest.MonkeyPatch, tmp_pat
 
     assert settings.vortex_model == "deepseek-v4-flash"
     assert settings.deepseek_base_url == "https://api.deepseek.com"
-    assert settings.max_agent_iterations == 24
-    assert settings.max_agent_tool_calls == 64
+    assert settings.max_agent_iterations is None
+    assert settings.max_tools_per_iteration == 8
+    assert settings.max_stalled_iterations == 3
+    assert settings.max_consecutive_tool_errors == 6
     assert settings.tool_timeout_seconds == 15.0
     with pytest.raises(ConfigurationError, match="DEEPSEEK_API_KEY"):
         settings.require_api_key()

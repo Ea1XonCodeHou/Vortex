@@ -37,7 +37,7 @@ Vortex 的核心价值不是“给大模型套一个聊天界面”，而是逐�
 
 ## 当前进度
 
-当前版本为 **v0.2.0 — Safe Workspace Exploration**。
+当前版本为 **v0.1.5 — Progress-Aware Runtime**。
 
 现阶段已经完成：
 
@@ -48,15 +48,26 @@ Vortex 的核心价值不是“给大模型套一个聊天界面”，而是逐�
 - DeepSeek 原生流式 Tool Calling 与跨分片参数组装
 - 默认关闭思考模式
 - 当前进程内的临时多轮对话
-- 自研有界单 Agent Loop 与显式 Run/Step 状态
+- 自研进展感知单 Agent Loop 与显式 Run/Step 状态
 - Tool Registry、统一执行管道和 Observation 回填
 - `workspace_overview`、`list_directory`、`read_file`、`search_files` 四个只读工作区工具
+- `apply_patch` 精确修改单个现有 UTF-8 文件，修改前展示完整 Diff
+- `run_command` 执行项目已有的测试、类型检查、Lint、构建和版本控制检查
 - 面向大型仓库的有界结构概览和大文件 UTF-8 连续分块读取
 - 绝对路径、路径穿越和符号链接逃逸防护
-- 24 个探索 Step、64 次工具调用和预算耗尽后的无工具强制总结
+- 交互模式默认不设置 Run 级总 Step 或总工具次数上限，新 Observation 会持续续期长任务
+- 每轮工具批量上限、重复 Observation 检测、连续控制错误熔断与安全总结
 - `Allow once`、`Allow for session`、`Deny` 会话级工具审批
 - 每个工作区会话按工具名称保存内存审批缓存，退出后自动清除
+- 写操作仅按当前任务授权，任务结束后展示文件与增删行汇总
+- 支持 Review 完整 Diff，并将最新一轮全部修改安全 Revert 到首次编辑前
+- 原子文件替换、预览后陈旧检测，以及外部修改冲突保护
+- 命令逐次审批、工作目录限制、禁用隐式 Shell、动态超时和进程组取消
+- stdout/stderr 有界采集、退出码回填，以及验证失败后的 Agent 自主修复与重试
+- `run_command` 参数校验与进程执行阶段区分，以及 JSON 编码 argv 的保守安全归一化
+- 命令非零退出作为诊断 Observation 推动迭代，不再被等同于 Runtime 无进展错误
 - TUI 工具参数、结果预览、状态和耗时展示
+- 工具轮临时行动文本自动收起，安全总结阶段拒绝展示供应商内部 Tool Calling 协议
 - 对话文本选择、系统剪贴板复制、内部粘贴与 macOS `pbcopy` 兼容
 - 有选区时 `Ctrl+C` 复制，无选区且正在生成时取消，`Ctrl+Q` 退出
 - 认证、余额、限流、超时和服务异常的安全错误提示
@@ -66,8 +77,8 @@ Vortex 的核心价值不是“给大模型套一个聊天界面”，而是逐�
 - Fake Provider、Fake Tool、MockTransport 与无头 TUI 确定性测试
 - Ruff、mypy strict 和 pytest 质量门禁
 
-> 当前 Agent 只具备经过会话审批、且受工作区约束的读取与搜索能力，不会修改文件或执行 Shell。
-> 持久化审批策略、上下文压缩、MCP 和多 Agent 仍属于后续里程碑。
+> 当前 Agent 可以读取、搜索、修改现有文本文件并执行经过逐次审批的非交互命令，但不能创建、
+> 删除或重命名文件。命令不经过隐式 Shell；其副作用暂不纳入 Patch Revert，也尚未运行在 Sandbox 中。
 
 ## 预期目标
 
@@ -75,11 +86,13 @@ Vortex 将按可验证的纵向切片逐步演进：
 
 1. **Chat Foundation（已完成）**：真实模型、流式输出、临时多轮对话与错误处理
 2. **Single-Agent Runtime（已完成）**：有界 Agent Loop、Tool Calling 与只读工作区工具
-3. **Model & Command UX**：模型配置、`/model` 等斜杠命令和基础运行参数
-4. **Safety & Trace**：扩展写操作权限、执行隔离、完整 Trace 与运行审计（只读审批已完成）
-5. **Session & Context**：会话持久化、上下文构建、Token 预算与压缩
-6. **MCP & Multi-Agent**：工具发现、MCP 接入和边界清晰的子 Agent 协作
-7. **Web Console**：会话、任务、运行过程、事件与产物的管理界面
+3. **Reviewable Editing（已完成）**：按轮授权的精确 Patch、Diff Review 与整轮 Revert
+4. **Verified Execution（已完成）**：受控命令执行、外部验证与失败修复闭环
+5. **Progress-Aware Runtime（已完成）**：长任务续期、停滞检测与可靠工具错误反馈
+6. **Safety & Trace**：执行 Sandbox、完整 Trace 与运行审计
+7. **Session & Context**：会话持久化、上下文构建、Token 预算与压缩
+8. **MCP & Multi-Agent**：工具发现、MCP 接入和边界清晰的子 Agent 协作
+9. **Web Console**：会话、任务、运行过程、事件与产物的管理界面
 
 长期目标是让 Vortex 能够在本地工作区中完成一条可追溯的 Agent 执行链路：
 
@@ -103,12 +116,16 @@ Textual TUI
     ▼
 AgentRuntime ─────────────── In-memory committed history
     │
+    ├── schedule → Progress-aware Budget Scheduler
     ├── model → ModelProvider → DeepSeek Chat Completions
     └── tool → Session Approval → Tool Registry → Tool Executor
                                                    ├── workspace_overview
                                                    ├── list_directory
                                                    ├── read_file (chunked)
-                                                   └── search_files
+                                                   ├── search_files
+                                                   ├── apply_patch
+                                                   │      └── TurnChangeTracker
+                                                   └── run_command
 ```
 
 当前实现遵循以下边界：
@@ -117,8 +134,18 @@ AgentRuntime ─────────────── In-memory committed h
 - Runtime 只消费 Vortex 自己定义的 `Message`、`ModelEvent`、`ToolCall` 和 `ToolResult`
 - Provider 负责协议转换、流式 Tool Call 拼接和模型错误归一化
 - Tool Executor 负责工具查找、参数校验、超时和安全错误转换
-- 权限管理器在执行前请求明确决定，并只在当前工作区进程会话缓存工具级允许项
-- 达到探索预算后关闭工具能力，要求模型基于已有 Observation 生成最佳最终答案
+- 权限管理器让只读工具按次/会话授权，让写工具只在当前任务内授权
+- 命令执行始终逐次授权，不能进入按轮或按会话缓存
+- 写工具先 Prepare 出精确 Diff，再审批和原子提交，避免“批准未知修改”
+- 最新任务的首次文件快照只保存在内存；下一任务开始即默认接受并丢弃快照
+- `run_command` 使用 argv 启动子进程，不解释管道、重定向、`&&` 等 Shell 语法
+- Agent 根据真实项目清单选择验证工具，不在 Runtime 中硬编码 Python、Node.js 等语言策略
+- 交互 Run 不消耗固定总工具额度；不同调用得到的新 Observation 会重置停滞计数
+- 单轮超额调用只延后处理；重复 Observation 或连续控制层错误才触发安全总结
+- 命令参数校验会明确标记 `Executed: false`，真实进程结果会标记 `Executed: true`
+- `run_command` 只对可确定解析为非空 `list[str]` 的 JSON 数组字符串执行安全归一化
+- 命令非零退出、目标未找到等新诊断结果属于有效进展；相同结果重复出现才计入停滞
+- 工具轮中的临时模型文本不进入最终对话，安全总结中的内部工具协议不会被渲染
 - 一次 Run 成功完成后，用户消息、工具调用、Observation 和最终回复才会原子提交
 - 取消、失败或达到上限的内容可以保留在界面，但不会污染下一轮模型上下文
 
@@ -182,8 +209,9 @@ cp .env.example .env
 DEEPSEEK_API_KEY=your-new-api-key
 VORTEX_MODEL=deepseek-v4-flash
 DEEPSEEK_BASE_URL=https://api.deepseek.com
-MAX_AGENT_ITERATIONS=24
-MAX_AGENT_TOOL_CALLS=64
+MAX_TOOLS_PER_ITERATION=8
+MAX_STALLED_ITERATIONS=3
+MAX_CONSECUTIVE_TOOL_ERRORS=6
 TOOL_TIMEOUT_SECONDS=15
 ```
 
@@ -247,8 +275,8 @@ vortex/
 │   ├── domain/                 # 供应商无关的领域对象和事件
 │   ├── providers/              # 模型供应商协议与适配器
 │   ├── runtime/                # 单 Agent Loop 与内存运行状态
-│   ├── tools/                  # Registry、Executor 与只读工作区工具
-│   └── permissions/            # 会话级审批协议、交互回调与内存允许缓存
+│   ├── tools/                  # Registry、Executor、工作区工具与轮次变更跟踪
+│   └── permissions/            # 按次、按轮、按会话审批与内存允许缓存
 └── tests/
     ├── unit/                   # 配置、Runtime 与 Provider 测试
     ├── tui/                    # Textual 无头交互测试
@@ -277,7 +305,8 @@ uv build --no-sources
 
 自动测试不会访问真实模型 API。DeepSeek 协议通过本地 MockTransport 验证，Runtime 与 TUI 使用
 确定性的 Fake Provider、Fake Tool 和 Fake Approval 验证流式分片、工具循环、审批、Observation、
-预算收尾、大文件分块、Markdown、复制、取消、错误和原子历史提交。
+长任务续期、停滞收尾、大文件分块、Patch 原子性、冲突 Revert、命令参数归一化、子进程
+超时/取消/输出截断、验证失败迭代、临时工具文本收起、Markdown、复制、错误和历史提交。
 
 ## 项目原则
 
@@ -292,9 +321,13 @@ uv build --no-sources
 ## 当前限制
 
 - 对话历史只保存在当前进程内，退出后不会恢复
+- 尚未实现上下文压缩；长任务不会被固定工具额度截断，但模型输入与调用成本仍会持续增长
 - 暂不支持 `/model` 等斜杠命令
-- 当前只有读取、目录浏览和文本搜索工具，不支持文件修改与 Shell
-- 当前审批缓存不持久化，也尚未包含写操作和 Shell 的高风险策略
+- `apply_patch` 只修改一个现有 UTF-8 文件，不支持创建、删除或重命名
+- 只支持最新一轮整体 Revert；开始下一轮或退出进程后不再可撤销
+- `run_command` 不提供隐式 Shell、交互程序或后台任务能力
+- 命令会执行本地项目代码，当前没有容器/Sandbox 或网络隔离，其产生的文件变化不支持 Revert
+- 当前审批缓存和修改快照均不持久化
 - 暂不支持 MCP 和多 Agent
 - 暂不包含数据库、后台 Core 服务和 Web 管理端
 - 当前仅提供 DeepSeek Provider

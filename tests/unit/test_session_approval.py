@@ -1,16 +1,26 @@
 """会话级工具审批缓存测试。"""
 
-from vortex.domain.permissions import ApprovalDecision, ToolApprovalRequest
+from vortex.domain.permissions import ApprovalDecision, ApprovalOutcome, ToolApprovalRequest
 from vortex.domain.tools import ToolCall, ToolRisk
 from vortex.permissions.session import SessionApprovalManager
 
 
-def _request(tool_name: str = "read_file") -> ToolApprovalRequest:
+def _request(
+    tool_name: str = "read_file",
+    *,
+    run_id: str = "run-1",
+    allowed_decisions: tuple[ApprovalDecision, ...] = (
+        ApprovalDecision.ALLOW_ONCE,
+        ApprovalDecision.ALLOW_SESSION,
+        ApprovalDecision.DENY,
+    ),
+) -> ToolApprovalRequest:
     return ToolApprovalRequest(
-        run_id="run-1",
+        run_id=run_id,
         iteration=1,
         call=ToolCall(id="call-1", name=tool_name, arguments={"path": "README.md"}),
         risk=ToolRisk.READ,
+        allowed_decisions=allowed_decisions,
     )
 
 
@@ -57,3 +67,46 @@ async def test_missing_client_prompt_fails_closed() -> None:
 
     assert outcome.decision is ApprovalDecision.DENY
     assert outcome.cached is False
+
+
+async def test_allow_turn_is_cached_only_for_same_run_and_tool() -> None:
+    manager = SessionApprovalManager()
+    prompt_count = 0
+
+    async def prompt(request: ToolApprovalRequest) -> ApprovalDecision:
+        nonlocal prompt_count
+        del request
+        prompt_count += 1
+        return ApprovalDecision.ALLOW_TURN
+
+    manager.set_prompt(prompt)
+    decisions = (ApprovalDecision.ALLOW_TURN, ApprovalDecision.DENY)
+
+    first = await manager.authorize(_request("apply_patch", allowed_decisions=decisions))
+    second = await manager.authorize(_request("apply_patch", allowed_decisions=decisions))
+    third = await manager.authorize(
+        _request("apply_patch", run_id="run-2", allowed_decisions=decisions)
+    )
+
+    assert first.cached is False
+    assert second == ApprovalOutcome(ApprovalDecision.ALLOW_TURN, cached=True)
+    assert third.cached is False
+    assert prompt_count == 2
+
+
+async def test_prompt_decision_outside_allowed_set_fails_closed() -> None:
+    manager = SessionApprovalManager()
+
+    async def prompt(request: ToolApprovalRequest) -> ApprovalDecision:
+        del request
+        return ApprovalDecision.ALLOW_SESSION
+
+    manager.set_prompt(prompt)
+    outcome = await manager.authorize(
+        _request(
+            "apply_patch",
+            allowed_decisions=(ApprovalDecision.ALLOW_TURN, ApprovalDecision.DENY),
+        )
+    )
+
+    assert outcome.decision is ApprovalDecision.DENY

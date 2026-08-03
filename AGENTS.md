@@ -28,7 +28,8 @@ Vortex 不是垂直业务助手，也不是“模型 API + 聊天页面”。任
 
 ## 2. 当前事实
 
-版本号以 `pyproject.toml` 为唯一事实来源。当前代码已经具备：
+版本号以 `pyproject.toml` 为唯一事实来源。当前版本为 **v0.1.5 — Progress-Aware Runtime**，
+代码已经具备：
 
 - Typer CLI 和 `vortex` 命令
 - Textual TUI 欢迎与对话界面
@@ -38,12 +39,21 @@ Vortex 不是垂直业务助手，也不是“模型 API + 聊天页面”。任
 - DeepSeek 原生流式 Tool Calling 与跨分片调用组装
 - 默认关闭思考模式
 - 当前进程内临时多轮历史
-- 自研有界单 Agent Loop 与类型化 Runtime Event
+- 自研进展感知单 Agent Loop 与类型化 Runtime Event
 - Tool Registry、统一 Executor 和 Observation 回填
 - 工作区受限的 `list_directory`、`read_file`、`search_files`
 - 面向大型仓库的 `workspace_overview` 与大文件连续分块读取
-- 只读工具首次调用审批、允许一次/本会话/拒绝和进程内缓存
-- 最大迭代、工具调用、工具超时和预算耗尽后的强制总结
+- 只读工具允许一次/本会话审批，写工具按当前 Run 审批
+- `apply_patch` 对单个现有 UTF-8 文件执行精确替换、Diff 预览和原子提交
+- 最新 Run 的内存变更汇总、完整 Diff Review 和整轮安全 Revert
+- Revert 外部修改冲突检测，避免覆盖用户在 Agent 之后做出的更改
+- `run_command` 的逐次审批、工作区 cwd、非 Shell argv 执行、超时和进程组取消
+- 命令退出码、stdout/stderr Observation 与验证失败后的 Agent 迭代
+- 命令参数校验/进程执行阶段区分，以及 JSON 编码 argv 的保守安全归一化
+- 交互 Run 默认无总迭代或总工具次数上限，依靠新 Observation 持续续期
+- 单轮工具上限、重复 Observation、连续控制错误检测和安全停止后的强制总结
+- 命令非零退出等新诊断结果视为进展，相同调用与结果重复出现才视为停滞
+- 工具轮临时文本收起与安全总结内部 Tool Calling 协议防泄漏
 - TUI 工具调用、结果预览、耗时和结束状态展示
 - TUI 选区复制、复制/取消动态路由和 macOS 剪贴板兼容
 - Textual MarkdownStream 增量 GFM 渲染
@@ -53,7 +63,7 @@ Vortex 不是垂直业务助手，也不是“模型 API + 聊天页面”。任
 
 当前尚未实现：
 
-- 文件修改、Shell 执行、持久化权限策略与执行沙箱
+- 新建/删除/重命名文件、隐式 Shell、持久化权限策略与执行沙箱
 - 持久化 Session、Task、Run、Step 和 Event
 - 上下文压缩、长期记忆和检索
 - MCP、多 Agent、FastAPI Core 和 Web Console
@@ -69,7 +79,7 @@ src/vortex/
 ├── config/         环境变量、配置默认值和配置验证
 ├── domain/         供应商无关的消息、事件和值对象
 ├── providers/      ModelProvider 协议、模型适配器和错误归一化
-├── runtime/        单 Agent Loop、运行限制与内存状态提交
+├── runtime/        单 Agent Loop、进展调度与内存状态提交
 ├── tools/          工具定义、Schema、Registry 和调用管道
 └── permissions/    风险分级、Policy 和 Approval
 ```
@@ -127,6 +137,10 @@ OpenAI Agents SDK 等编排框架引入核心执行路径，除非任务明确�
 ### 4.4 状态提交
 
 - 当前 `AgentRuntime` 仅在 Run 成功后原子提交用户消息、工具调用、Observation 与最终回复
+- 文件编辑在工具成功时即时落盘；本轮首次内容形成内存快照，并在 Run 结束后提供整体 Revert
+- 下一 Run 开始表示用户接受上一轮修改，必须丢弃旧快照；不得暗中保留撤销历史
+- Revert 前必须验证文件仍等于 Vortex 最后写入内容，冲突时拒绝覆盖
+- 命令可能执行项目代码并产生副作用；当前版本必须逐次审批，且不得声称命令变化可被 Revert
 - 失败或取消的模型文本可用于 UI 展示，但不得自动进入下一轮上下文
 - 未来持久化后，完整会话记录、模型上下文和长期记忆必须保持概念分离
 - 不要把数据库中的全部历史无条件发送给模型
@@ -135,6 +149,16 @@ OpenAI Agents SDK 等编排框架引入核心执行路径，除非任务明确�
 
 Runtime 围绕 `RuntimeEvent` 驱动客户端更新。事件表示已经发生的事实，必须具备稳定类型、顺序
 和关联标识。日志用于调试，Trace 用于调用链与性能分析，两者都不能代替领域事件。
+
+### 4.6 进展调度
+
+- 交互模式不得重新引入较小的 Run 级固定工具总额度；显式 `max_iterations` 只用于测试或未来的
+  无人值守模式
+- 单轮工具上限用于控制批量负载，超出部分必须得到可回填的 Tool Result，不得整批拒绝或终止 Run
+- 调度器以工具名称、参数、结果内容和错误码的稳定指纹判断 Observation 是否重复
+- `COMMAND_FAILED`、`NOT_FOUND` 等新结果可能是有效诊断证据，不得仅凭 `is_error` 判定无进展
+- 参数校验、未知工具、权限、超时和执行边界错误属于控制层失败；连续发生时允许安全停止
+- 安全总结关闭工具后必须缓冲并校验完整文本，再决定是否生成可见的最终回复
 
 ## 5. 模型 Provider 规范
 
@@ -170,6 +194,8 @@ Runtime 围绕 `RuntimeEvent` 驱动客户端更新。事件表示已经发生�
 - 输入框在成功、失败和取消后必须恢复可用与焦点
 - 自动滚动使用 anchor 语义，用户主动上滚后不要强制拉回底部
 - 新增布局必须同时考虑窄终端行为
+- 产生结构化工具调用的 Step 中，模型临时行动文本不得作为最终回答长期保留
+- 安全总结必须先缓冲并校验，不得把供应商内部 Tool Calling 协议渲染给用户
 - 不得为了视觉效果引入另一套与 Textual 重叠的交互框架
 
 流式 Markdown 需要测试跨分片语法，例如拆开的强调标记、标题、代码围栏和表格分隔行。不得只用
@@ -310,8 +336,8 @@ uv run vortex --version
 在没有新设计决策前，建议按以下顺序演进：
 
 1. 稳定当前模型通信、Markdown 和 TUI 交互
-2. 增加基础斜杠命令与模型配置
-3. 为写文件和 Shell 建立风险分级、权限审批与执行隔离
+2. 完善现有 `apply_patch` 的创建文件等编辑能力
+3. 为命令执行增加更强的风险策略与 Sandbox 隔离
 4. 增加 Trace、完整 Run/Step/Event 记录与任务回放
 5. 再建设持久化会话和 Context Builder
 6. 最后扩展 MCP、多 Agent、后台 Core 和 Web
